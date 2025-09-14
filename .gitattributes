@@ -1,0 +1,71 @@
+# =============================================================================
+# .gitattributes for Paul Lee's Bash Scripts Repository
+# =============================================================================
+# This file ensures consistent line endings and file handling for bash scripts.
+# =============================================================================
+
+# =============================================================================
+# Default Behavior
+# =============================================================================
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# =============================================================================
+# Text Files
+# =============================================================================
+# Shell scripts
+*.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
+
+# Configuration files
+*.conf text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.txt text eol=lf
+*.rst text eol=lf
+*.adoc text eol=lf
+*.org text eol=lf
+
+# Makefiles
+Makefile text eol=lf
+makefile text eol=lf
+*.mk text eol=lf
+
+# =============================================================================
+# Binary Files
+# =============================================================================
+# Archives
+*.zip binary
+*.tar binary
+*.gz binary
+*.bz2 binary
+*.7z binary
+*.rar binary
+*.xz binary
+
+# =============================================================================
+# Diff and Merge Tools
+# =============================================================================
+# Shell scripts - use text diff
+*.sh diff=text
+*.bash diff=text
+
+# =============================================================================
+# Language-Specific Attributes
+# =============================================================================
+# Shell scripts
+*.sh linguist-language=Shell
+*.bash linguist-language=Shell
+
+# =============================================================================
+# End of .gitattributes
+# =============================================================================

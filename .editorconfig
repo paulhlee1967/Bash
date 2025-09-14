@@ -1,0 +1,111 @@
+# =============================================================================
+# .editorconfig for Paul Lee's Bash Scripts Repository
+# =============================================================================
+# This file defines coding standards and editor settings for consistent
+# formatting of bash scripts and related files.
+# =============================================================================
+
+# Top-most EditorConfig file
+root = true
+
+# =============================================================================
+# Default Settings
+# =============================================================================
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# =============================================================================
+# Shell Scripts
+# =============================================================================
+[*.{sh,bash,zsh}]
+indent_style = space
+indent_size = 4
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# Makefiles
+# =============================================================================
+[{Makefile,makefile,*.mk}]
+indent_style = tab
+indent_size = 4
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# Configuration Files
+# =============================================================================
+[*.{conf,cfg,ini,toml}]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# JSON Files
+# =============================================================================
+[*.json]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# YAML Files
+# =============================================================================
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# Markdown Files
+# =============================================================================
+[*.md]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# Text Files
+# =============================================================================
+[*.txt]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# Git Files
+# =============================================================================
+[.gitignore]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[.gitattributes]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# =============================================================================
+# End of .editorconfig
+# =============================================================================

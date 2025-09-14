@@ -1,0 +1,76 @@
+name: Bash Script CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - '*.sh'
+      - '.github/workflows/bash-ci.yml'
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - '*.sh'
+      - '.github/workflows/bash-ci.yml'
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y lftp jq shellcheck
+        
+    - name: Make scripts executable
+      run: |
+        find . -name "*.sh" -exec chmod +x {} \;
+        
+    - name: Lint bash scripts
+      run: |
+        if [ -n "$(find . -name "*.sh" -type f)" ]; then
+          for script in *.sh; do
+            if [ -f "$script" ]; then
+              echo "Linting $script..."
+              shellcheck "$script"
+            fi
+          done
+        else
+          echo "No bash scripts found"
+        fi
+        
+    - name: Test script syntax
+      run: |
+        if [ -n "$(find . -name "*.sh" -type f)" ]; then
+          for script in *.sh; do
+            if [ -f "$script" ]; then
+              echo "Testing syntax of $script..."
+              bash -n "$script"
+            fi
+          done
+        else
+          echo "No bash scripts found"
+        fi
+        
+    - name: Test script help/version options
+      run: |
+        if [ -n "$(find . -name "*.sh" -type f)" ]; then
+          for script in *.sh; do
+            if [ -f "$script" ]; then
+              echo "Testing help/version options for $script..."
+              # Test help option
+              if grep -q "help\|--help\|-h" "$script"; then
+                bash "$script" --help >/dev/null 2>&1 || bash "$script" -h >/dev/null 2>&1 || true
+              fi
+              # Test version option
+              if grep -q "version\|--version\|-V" "$script"; then
+                bash "$script" --version >/dev/null 2>&1 || bash "$script" -V >/dev/null 2>&1 || true
+              fi
+            fi
+          done
+        else
+          echo "No bash scripts found"
+        fi

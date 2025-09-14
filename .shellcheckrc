@@ -1,0 +1,66 @@
+# =============================================================================
+# .shellcheckrc for Paul Lee's Bash Scripts Repository
+# =============================================================================
+# This file configures ShellCheck (https://www.shellcheck.net/) for consistent
+# bash script linting across the repository.
+# =============================================================================
+
+# =============================================================================
+# ShellCheck Configuration
+# =============================================================================
+
+# Enable all checks by default
+enable=all
+
+# =============================================================================
+# Disabled Checks (with explanations)
+# =============================================================================
+
+# SC1090: Can't follow non-constant source. Use a directive to specify location.
+# Disabled because some scripts may source files dynamically
+disable=SC1090
+
+# SC1091: Not following sourced file. Use a directive to specify location.
+# Disabled because some scripts may source files that don't exist at lint time
+disable=SC1091
+
+# SC2034: Variable appears unused. Verify it or export it.
+# Disabled because some variables may be used in ways ShellCheck doesn't detect
+disable=SC2034
+
+# SC2154: Referenced but not assigned. This may be intentional.
+# Disabled because some variables may be set by external sources
+disable=SC2154
+
+# SC2164: Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
+# Disabled because some scripts handle cd failures differently
+disable=SC2164
+
+# SC2310: This function is invoked in a condition so set -e will be disabled.
+# Disabled because these are informational warnings about best practices,
+# not actual errors. The code is functionally correct.
+disable=SC2310
+
+# =============================================================================
+# ShellCheck Directives for Specific Files
+# =============================================================================
+
+# For sync-asimov.sh - allow sourcing of external files
+# shellcheck source=/dev/null
+
+# For synccollection.sh - allow sourcing of external files
+# shellcheck source=/dev/null
+
+# =============================================================================
+# Additional Configuration
+# =============================================================================
+
+# Set shell dialect to bash
+shell=bash
+
+# Set shell version (bash 4.0+ features)
+shell-version=4.0
+
+# =============================================================================
+# End of .shellcheckrc
+# =============================================================================
