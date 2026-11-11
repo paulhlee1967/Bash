@@ -10,7 +10,7 @@
 # ORIGINAL LICENSE: MIT License
 #
 # BASH PORT AUTHOR: Paul Lee
-# BASH PORT VERSION: 1.1.1
+# BASH PORT VERSION: 1.2.0
 # BASH PORT LICENSE: MIT License
 # BASH PORT REPOSITORY: https://github.com/paullee/Bash
 #
@@ -21,15 +21,16 @@
 # This script downloads collections from the Internet Archive with the following
 # features:
 #
-# ✅ Resume Capability - Only downloads new or updated items
+# ✅ Resume Capability - Downloads only new, updated, or missing zips
+# ✅ Mirror - Deletes local zips that have left the collection once the full set was fetched
 # ✅ Progress Tracking - Real-time download progress and statistics
 # ✅ Error Handling - Comprehensive error handling with meaningful messages
-# ✅ Dry Run Mode - Preview the sync without saving zips or updating fileList.txt
+# ✅ Dry Run Mode - Preview downloads and removals without changing files
 # ✅ Verbose Logging - Detailed debug information when needed
 # ✅ Input Validation - Validates collection names and row counts
 # ✅ Retry Logic - Automatic retry for failed network requests
 # ✅ Cleanup - Automatic cleanup of temporary files
-# ✅ Exclude Patterns - Skip items whose names match a shell glob
+# ✅ Exclude Patterns - Skip matching names and delete matching zips already on disk
 # ✅ Cross-Platform - Works on macOS and other Unix-like systems
 #
 # =============================================================================
@@ -52,9 +53,10 @@
 # Command Line Options:
 #   -h, --help      Show help message and exit
 #   -v, --verbose   Enable verbose output
-#   -n, --dry-run   Preview the sync. No zip is saved and fileList.txt is not updated
+#   -n, --dry-run   Preview the sync. No zip is saved, removed, or recorded
 #   -r, --root-dir  Directory for collection folders (default: current directory)
-#   -x, --exclude   Skip items whose names match a shell glob (repeatable)
+#   -x, --exclude   Skip matching names and delete matching zips already saved
+#   -j, --jobs      Number of items to download at once (default: 4, max: 8)
 #   -V, --version   Show version information and exit
 #
 # Options may appear in any order. The directory must follow --root-dir, and
@@ -96,7 +98,7 @@
 # Download first 50 items from the Software Library:
 #   ./synccollection.sh 50 softwarelibrary
 #
-# Preview the sync without saving zips or updating fileList.txt:
+# Preview the sync without saving, removing, or recording files:
 #   ./synccollection.sh --dry-run 10 softwarelibrary
 #
 # Verbose mode with detailed logging:
@@ -121,21 +123,22 @@
 # =============================================================================
 #
 # 1. Validation - Validates command line arguments and system dependencies
-# 2. Metadata Fetching - Retrieves collection metadata from Internet Archive API
+# 2. Metadata Fetching - Retrieves collection metadata in pages of 50000
 # 3. State Management - Maintains local file list (fileList.txt) to track downloads
-# 4. Smart Downloading - Compares each remote update date with fileList.txt
-#    - Same or older remote date: leave the existing zip in place
-#    - Newer remote date: download again and overwrite <identifier>.zip
-#    - Not listed in fileList.txt: download, overwriting a zip of the same name
+# 4. Smart Downloading - Compares the whole file list in one pass
+#    - Same or older remote date, and the zip is on disk: leave it in place
+#    - Newer remote date, missing fileList.txt row, or missing zip: download
 #    - A zip copied in by hand is not treated as already synced
-#    - Local files are kept when an item disappears from the collection
-# 5. Exclude Filtering - Optional shell globs skip matching item names.
-#    Patterns are case-sensitive, match the item name, and do not need .zip.
-#    They do not look inside the archive. Skipped items are not recorded, so
-#    they are checked again on the next run.
-# 6. Progress Tracking - Shows real-time progress and statistics
-# 7. Error Handling - Gracefully handles network errors and failed downloads
-# 8. Cleanup - Automatically cleans up temporary files
+# 5. Mirror - When every item in the collection was fetched, delete local zips
+#    whose items are gone. A short row count keeps zips outside that fetch.
+#    The file list is rewritten from the items that remain.
+# 6. Exclude Filtering - Optional shell globs match the item name. They do not
+#    look inside the archive and do not need a .zip suffix. A match is not
+#    downloaded. A matching zip already on disk is deleted, and its file list
+#    row is removed, including when the row count does not cover the collection.
+# 7. Progress Tracking - Shows real-time progress and statistics
+# 8. Error Handling - Gracefully handles network errors and failed downloads
+# 9. Cleanup - Automatically cleans up temporary files
 #
 # File Structure:
 #   collection_name/
@@ -174,7 +177,7 @@
 # Debug Mode:
 #   ./synccollection.sh --verbose 10 softwarelibrary
 #
-# Dry Run Mode (no zips saved, fileList.txt unchanged):
+# Dry Run Mode (no zips saved or removed, fileList.txt unchanged):
 #   ./synccollection.sh --dry-run 10 softwarelibrary
 #
 # =============================================================================
@@ -215,7 +218,7 @@ set -euo pipefail
 SCRIPT_NAME=""
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.2.0"
 readonly SCRIPT_VERSION
 SCRIPT_AUTHOR="Paul Lee"
 readonly SCRIPT_AUTHOR
@@ -241,6 +244,15 @@ MAX_ROWS="100000"  # Reasonable upper limit
 readonly MAX_ROWS
 MIN_ROWS="1"       # Minimum rows to process
 readonly MIN_ROWS
+# Catalog page size. 50000 matches the default row count, so a collection
+# that fits in one request is fetched from the start. A later page uses a
+# deep result offset, and Archive.org rejects that with HTTP 507.
+IA_PAGE_SIZE="50000"
+readonly IA_PAGE_SIZE
+DEFAULT_JOBS="4"
+readonly DEFAULT_JOBS
+MAX_JOBS="8"
+readonly MAX_JOBS
 
 # Internet Archive API configuration
 IA_BASE_URL="https://archive.org"
@@ -283,6 +295,15 @@ ROOT_DIR=""
 VERBOSE=false
 DRY_RUN=false
 EXCLUDE_PATTERNS=()
+JOBS="${DEFAULT_JOBS}"
+PARALLEL_DOWNLOADS=false
+SEARCH_COMPLETE=false
+SEARCH_NUM_FOUND=0
+SEARCH_FETCHED=0
+SEARCH_RESULTS_FILE=""
+START_DIR=""
+COLLECTION_DIR=""
+SYNC_WORK=""
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -314,7 +335,7 @@ print_debug() {
 # Print usage information
 show_usage() {
     cat << EOF
-${BOLD}${SCRIPT_NAME} v${SCRIPT_VERSION}${RESET} - Internet Archive Collection Downloader
+${BOLD}${SCRIPT_NAME} v${SCRIPT_VERSION}${RESET} - Internet Archive Collection Sync
 
 ${BOLD}DESCRIPTION:${RESET}
     Download collections from the Internet Archive. Each item is saved as
@@ -322,17 +343,21 @@ ${BOLD}DESCRIPTION:${RESET}
     in the collection folder:
 
     - The same or an older remote date leaves the existing zip in place.
-    - A newer remote date downloads the zip again and overwrites it.
-    - An item missing from fileList.txt is downloaded. A zip of the same
-      name is overwritten, including one copied in by hand.
+    - A newer remote date, a missing fileList.txt row, or a missing zip
+      downloads the item again. A zip copied in by hand is overwritten
+      unless its name and date are already in fileList.txt.
     - --exclude matches the item name, not files inside the zip. Do not add
-      .zip to the pattern. Matches are not recorded and are checked again
-      on the next run.
-    - Local files are kept when an item disappears from the collection.
+      .zip to the pattern. A match is not downloaded. A matching zip already
+      on disk is deleted, and its fileList.txt row is removed.
+    - When the fetch includes every item in the collection, a local zip whose
+      item has left the collection is deleted.
+    - When the row count stops the fetch early, zips outside that fetch are
+      kept. Excluded names are still removed.
 
-    Options may appear in any order. The path must follow --root-dir, and
-    the pattern must follow each --exclude. A row count must be the first
-    positional argument, before any collection name.
+    Options may appear in any order. The path must follow --root-dir, the
+    pattern must follow each --exclude, and the number must follow --jobs.
+    A row count must be the first positional argument, before any collection
+    name.
 
     ${BOLD}Original .NET version by:${RESET} ${ORIGINAL_AUTHOR}
     ${BOLD}Original repository:${RESET} ${ORIGINAL_REPOSITORY}
@@ -342,22 +367,25 @@ ${BOLD}USAGE:${RESET}
     ${SCRIPT_NAME} [options] [rows] [collection1] [collection2] ...
 
 ${BOLD}ARGUMENTS:${RESET}
-    rows         Number of items to download (default: ${DEFAULT_ROWS}, max: ${MAX_ROWS})
+    rows         Number of items to fetch (default: ${DEFAULT_ROWS}, max: ${MAX_ROWS}).
+                Items that left the collection are removed only when this
+                covers the whole collection
     collection   Collection identifier(s) (default: ${DEFAULT_COLLECTION})
                 Multiple collections can be specified
 
 ${BOLD}OPTIONS:${RESET}
     -h, --help         Show this help message and exit
     -v, --verbose      Enable verbose output
-    -n, --dry-run      Preview the sync. No zip is saved and fileList.txt is not updated
+    -n, --dry-run      Preview the sync. Nothing is saved, removed, or recorded
     -r, --root-dir DIR Collection folders are created under DIR (default: current directory).
                        DIR is created if it does not exist
     -x, --exclude PAT  Skip an item when its name matches PAT (shell glob).
                        Repeat for more patterns. Quote patterns so the shell
                        does not expand them. Patterns are case-sensitive and
                        match the item name. You do not need to add .zip.
-                       Matching items are not downloaded. Every other item is
-                       still saved as one zip.
+                       Matching items are not downloaded. A matching zip
+                       already on disk is deleted.
+    -j, --jobs N       Download N items at the same time (default: ${DEFAULT_JOBS}, maximum: ${MAX_JOBS})
     -V, --version      Show version information and exit
 
 ${BOLD}EXAMPLES:${RESET}
@@ -367,6 +395,7 @@ ${BOLD}EXAMPLES:${RESET}
     ${SCRIPT_NAME} collection1 collection2           # Download multiple collections
     ${SCRIPT_NAME} 100 coll1 coll2 coll3             # Download 100 items from 3 collections
     ${SCRIPT_NAME} --verbose 100 softwarelibrary     # Verbose mode with 100 items
+    ${SCRIPT_NAME} --jobs 1 100 softwarelibrary      # Download one item at a time
     ${SCRIPT_NAME} --dry-run 10 softwarelibrary      # Preview the sync without saving files
     ${SCRIPT_NAME} --exclude '*demo*' --exclude '*beta*' 50 softwarelibrary
     ${SCRIPT_NAME} --dry-run --exclude '*demo*' 10 apple_ii_library_4am
@@ -435,6 +464,15 @@ cleanup() {
                 print_debug "Removed temporary file: ${temp_file}"
             fi
         done
+    fi
+
+    if [[ -n "${SYNC_WORK:-}" && -d "${SYNC_WORK}" ]]; then
+        rm -rf "${SYNC_WORK}"
+    fi
+
+    if [[ -n "${COLLECTION_DIR:-}" && -d "${COLLECTION_DIR}" ]]; then
+        find "${COLLECTION_DIR}" -maxdepth 1 -type f -name '*.zip.partial' -delete 2>/dev/null || true
+        rm -f "${COLLECTION_DIR}/${FILE_LIST_NAME}.tmp"
     fi
 
     if [[ ${exit_code} -ne 0 ]]; then
@@ -520,6 +558,23 @@ validate_rows() {
     return 0
 }
 
+# Validate concurrent download count
+validate_jobs() {
+    local jobs="$1"
+
+    if [[ ! "${jobs}" =~ ^[0-9]+$ ]] || [[ "${jobs}" -lt 1 ]]; then
+        print_error "Invalid jobs value: '${jobs}' (use a whole number from 1 to ${MAX_JOBS})"
+        return 1
+    fi
+
+    if [[ "${jobs}" -gt "${MAX_JOBS}" ]]; then
+        print_error "Jobs value ${jobs} is above the maximum of ${MAX_JOBS}"
+        return 1
+    fi
+
+    return 0
+}
+
 # Check system dependencies
 check_dependencies() {
     local missing_deps=()
@@ -586,7 +641,16 @@ parse_arguments() {
                 ;;
             -n|--dry-run)
                 DRY_RUN=true
-                print_info "Dry run mode enabled - no zips will be saved and fileList.txt will not be updated"
+                print_info "Dry run mode enabled - no files will be saved, removed, or recorded"
+                ;;
+            -j|--jobs)
+                if [[ $((i + 1)) -ge ${#args[@]} ]]; then
+                    print_error "Error: --jobs requires a number"
+                    exit 1
+                fi
+                JOBS="${args[$((i + 1))]}"
+                print_debug "Concurrent downloads set to: ${JOBS}"
+                i=$((i + 1))
                 ;;
             -r|--root-dir)
                 if [[ $((i + 1)) -ge ${#args[@]} ]]; then
@@ -687,6 +751,10 @@ parse_arguments() {
         exit 1
     fi
 
+    if ! validate_jobs "${JOBS}"; then
+        exit 1
+    fi
+
     # Validate all collections
     for collection in "${COLLECTIONS[@]}"; do
         if ! validate_collection "${collection}"; then
@@ -709,11 +777,12 @@ create_collection_directory() {
     local collection="$1"
     local collection_dir
 
-    # Determine the full path for the collection directory
+    # Determine the full path for the collection directory. Later collections
+    # must not be created inside the previous one after this function cds.
     if [[ -n "${ROOT_DIR}" ]]; then
         collection_dir="${ROOT_DIR}/${collection}"
     else
-        collection_dir="${collection}"
+        collection_dir="${START_DIR}/${collection}"
     fi
 
     if [[ ! -d "${collection_dir}" ]]; then
@@ -729,208 +798,350 @@ create_collection_directory() {
         print_error "Failed to change to directory: ${collection_dir}"
         exit 3
     fi
+
+    COLLECTION_DIR="${collection_dir}"
 }
 
-# Archive old download list
+# Copy the current file list aside before this run rewrites it.
 archive_old_download_list() {
-    local collection="$1"
     local file_list_path="${FILE_LIST_NAME}"
     local file_list_old_path="${FILE_LIST_OLD_NAME}"
 
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        return 0
+    fi
+
     if [[ -f "${file_list_path}" ]]; then
-        if [[ -f "${file_list_old_path}" ]]; then
-            rm -f "${file_list_old_path}"
-        fi
-        mv "${file_list_path}" "${file_list_old_path}"
-        print_info "Archived old file list"
-
-        # Restore the file list so we can check what's already downloaded
-        cp "${file_list_old_path}" "${file_list_path}"
+        cp "${file_list_path}" "${file_list_old_path}"
+        print_info "Backed up file list to ${file_list_old_path}"
     fi
 }
 
 # =============================================================================
-# DATE COMPARISON FUNCTIONS
+# SYNC PLANNING
 # =============================================================================
 
-# Parse ISO 8601 date to Unix timestamp
-parse_iso_date() {
-    local date_str="$1"
-    local timestamp
-
-    # Try different date formats
-    timestamp=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "${date_str}" "+%s" 2>/dev/null) || \
-    timestamp=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${date_str}" "+%s" 2>/dev/null) || \
-    timestamp=$(date -j -f "%Y-%m-%d %H:%M:%S" "${date_str}" "+%s" 2>/dev/null) || \
-    timestamp="0"
-
-    echo "${timestamp}"
+# Internet Archive item identifiers are a single safe path component.
+valid_item_name() {
+    [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
-# Check if item needs downloading
-item_needs_download() {
-    local identifier="$1"
-    local update_date="$2"
-    local local_file="$3"
+# Classify every remote item in one pass.
+# ISO-8601 dates in the forms the Archive sends sort as digits, so this does
+# not fork date(1) once per item.
+#
+# Prints: action, identifier, remote date, stored date
+#   download  needs a zip
+#   keep      leave the zip and the stored date
+#   nodate    remote item has no usable update date
+classify_items() {
+    local file_list="$1"
+    local zip_ids="$2"
+    local search_file="$3"
 
-    print_debug "Checking if item needs download: ${identifier}"
+    {
+        echo "#LIST"
+        if [[ -f "${file_list}" ]]; then
+            cat "${file_list}"
+        fi
+        echo "#ZIPS"
+        if [[ -f "${zip_ids}" ]]; then
+            cat "${zip_ids}"
+        fi
+        echo "#REMOTE"
+        cat "${search_file}"
+    } | awk -F '\t' -v OFS='\t' '
+        function norm(s,    x) {
+            x = s
+            gsub(/[^0-9]/, "", x)
+            if (length(x) < 8) {
+                return ""
+            }
+            return substr(x "00000000000000", 1, 14)
+        }
+        $0 == "#LIST" { section = "list"; next }
+        $0 == "#ZIPS" { section = "zips"; next }
+        $0 == "#REMOTE" { section = "remote"; next }
+        section == "list" {
+            if ($1 != "") {
+                local_date[$1] = $2
+                in_list[$1] = 1
+            }
+            next
+        }
+        section == "zips" {
+            if ($1 != "") {
+                zip[$1] = 1
+            }
+            next
+        }
+        section == "remote" {
+            id = $1
+            remote = $2
+            if (id == "" || seen[id]++) {
+                next
+            }
+            if (remote == "") {
+                old = (id in in_list) ? local_date[id] : ""
+                print "nodate", id, "", old
+                next
+            }
+            if (!(id in in_list)) {
+                print "download", id, remote, ""
+                next
+            }
+            old = local_date[id]
+            rn = norm(remote)
+            ln = norm(old)
+            if (rn == "" || (ln != "" && rn <= ln)) {
+                if (rn != "" && !(id in zip)) {
+                    print "download", id, remote, old
+                } else {
+                    print "keep", id, remote, old
+                }
+            } else {
+                print "download", id, remote, old
+            }
+        }
+    '
+}
 
-    # Check if item exists in local file list
-    if [[ -f "${local_file}" ]]; then
-        local local_date
-        local_date=$(grep "^${identifier}" "${local_file}" | cut -f2)
+# Print the identifier of each top-level zip that uses a safe item name.
+list_local_zip_ids() {
+    local path name
 
-        if [[ -n "${local_date}" ]]; then
-            print_debug "Found local date for ${identifier}: ${local_date}"
-
-            # Compare dates
-            local remote_timestamp
-            local local_timestamp
-            remote_timestamp=$(parse_iso_date "${update_date}")
-            local_timestamp=$(parse_iso_date "${local_date}")
-
-            print_debug "Date comparison: remote=${remote_timestamp}, local=${local_timestamp}"
-
-            if [[ "${remote_timestamp}" -gt "${local_timestamp}" ]]; then
-                print_debug "Remote is newer, needs download"
-                return 0  # Needs download
-            else
-                print_debug "Local is newer or same, no download needed"
-                return 1  # No download needed
-            fi
+    find . -maxdepth 1 -type f -name '*.zip' -print0 > "${SYNC_WORK}/zips.null"
+    while IFS= read -r -d '' path; do
+        name=$(basename -- "${path}")
+        name="${name%.zip}"
+        if valid_item_name "${name}"; then
+            printf '%s\n' "${name}"
         else
-            print_debug "Item not found in local file list, needs download"
+            print_debug "Ignoring local file with an unusual name: ${path}"
         fi
-    else
-        print_debug "Local file list not found, needs download"
-    fi
-
-    return 0  # Needs download (not in local list)
-}
-
-# Add item to local file list
-add_to_local_file_list() {
-    local identifier="$1"
-    local update_date="$2"
-    local local_file="$3"
-
-    print_debug "Adding item to local file list: ${identifier}"
-
-    # Remove existing entry if it exists
-    if [[ -f "${local_file}" ]]; then
-        grep -v "^${identifier}" "${local_file}" > "${local_file}.tmp" 2>/dev/null || touch "${local_file}.tmp"
-        mv "${local_file}.tmp" "${local_file}"
-    fi
-
-    # Add new entry
-    echo -e "${identifier}\t${update_date}" >> "${local_file}"
+    done < "${SYNC_WORK}/zips.null"
 }
 
 # =============================================================================
 # INTERNET ARCHIVE API FUNCTIONS
 # =============================================================================
 
-# Build Internet Archive search URL
+# Build one page of an Internet Archive search.
 build_search_url() {
     local collection="$1"
-    local rows="$2"
-
-    # URL encode the collection parameter
+    local page_rows="$2"
+    local page="$3"
     local encoded_collection
+
     encoded_collection=$(printf '%s\n' "${collection}" | sed "s/[[\.*^$()+?{|]/\\&/g")
 
-    echo "${IA_SEARCH_URL}?q=collection%3A${encoded_collection}&fl%5B%5D=identifier&fl%5B%5D=oai_updatedate&sort%5B%5D=identifier+asc&sort%5B%5D=&sort%5B%5D=&rows=${rows}&output=json"
+    echo "${IA_SEARCH_URL}?q=collection%3A${encoded_collection}&fl%5B%5D=identifier&fl%5B%5D=oai_updatedate&sort%5B%5D=identifier+asc&rows=${page_rows}&page=${page}&output=json"
 }
 
-# Get search results from Internet Archive
-get_search_results() {
-    local collection="$1"
-    local url
-    url=$(build_search_url "${collection}" "${ROWS}")
-
-    print_info "Fetching collection metadata from Internet Archive..."
-    print_debug "URL: ${url}"
-
-    local response
-    local http_code
-
-    # Make HTTP request with timeout and retry logic
+# Download one search page. Returns 0 and writes the body on HTTP 200.
+fetch_search_body() {
+    local url="$1"
+    local dest="$2"
     local max_retries=3
     local retry_count=0
+    local http_code=""
 
     while [[ ${retry_count} -lt ${max_retries} ]]; do
-        if response=$(curl -s -w "%{http_code}" --connect-timeout 30 --max-time 300 "${url}" 2>/dev/null); then
-            break
-        else
-            ((retry_count++))
-            if [[ ${retry_count} -lt ${max_retries} ]]; then
-                print_warning "Request failed, retrying... (attempt $((retry_count + 1))/${max_retries})"
-                sleep 2
-            else
-                print_error "Failed to fetch collection metadata after ${max_retries} attempts"
-                exit 2
-            fi
+        http_code=""
+        if http_code=$(curl -sS --compressed -o "${dest}" -w "%{http_code}" --connect-timeout 30 --max-time 300 "${url}" 2>"${dest}.err"); then
+            :
+        fi
+        if [[ -z "${http_code}" ]]; then
+            http_code="000"
+        fi
+
+        if [[ "${http_code}" == "200" ]]; then
+            rm -f "${dest}.err"
+            return 0
+        fi
+
+        retry_count=$((retry_count + 1))
+        if [[ ${retry_count} -lt ${max_retries} ]]; then
+            print_warning "Request failed (HTTP ${http_code}), retrying... (attempt $((retry_count + 1))/${max_retries})"
+            sleep 2
         fi
     done
 
-    http_code="${response: -3}"
-    local json_response="${response%???}"
+    print_error "Failed to fetch collection metadata after ${max_retries} attempts (HTTP ${http_code})"
+    if [[ -s "${dest}.err" ]]; then
+        print_debug "curl: $(<"${dest}.err")"
+    fi
+    rm -f "${dest}.err"
 
-    if [[ "${http_code}" != "200" ]]; then
-        print_error "Request failed with HTTP code: ${http_code}"
-        case "${http_code}" in
-            404)
-                print_error "Collection not found: ${collection}"
-                ;;
-            429)
-                print_error "Rate limited. Please try again later."
-                ;;
-            500|502|503|504)
-                print_error "Server error. Please try again later."
-                ;;
-            *)
-                print_error "Unexpected HTTP status code: ${http_code}"
-                ;;
-        esac
+    case "${http_code}" in
+        404)
+            print_error "Collection not found"
+            ;;
+        429)
+            print_error "Rate limited. Please try again later."
+            ;;
+        500|502|503|504)
+            print_error "Server error. Please try again later."
+            ;;
+        000)
+            print_error "Could not reach the Internet Archive."
+            ;;
+        *)
+            print_error "Unexpected HTTP status code: ${http_code}"
+            ;;
+    esac
+    return 1
+}
+
+# Append identifier and latest update date rows from one search response.
+append_search_docs() {
+    local body="$1"
+    local dest="$2"
+
+    if ! jq -e '.response.numFound != null' "${body}" >/dev/null 2>&1; then
+        print_error "Search response did not include a result count"
+        return 1
+    fi
+
+    jq -r '
+        .response.docs[]?
+        | [
+            (.identifier // ""),
+            (
+              if (.oai_updatedate | type) == "array" then (.oai_updatedate[-1] // "")
+              elif (.oai_updatedate | type) == "string" then .oai_updatedate
+              else ""
+              end
+            )
+          ]
+        | @tsv
+    ' "${body}" >> "${dest}"
+}
+
+# Get search results from Internet Archive.
+# Pages until ROWS items or the whole collection, whichever is smaller.
+# Sets SEARCH_RESULTS_FILE, SEARCH_NUM_FOUND, SEARCH_FETCHED, and SEARCH_COMPLETE.
+# SEARCH_COMPLETE is true only when every item in the collection was fetched.
+get_search_results() {
+    local collection="$1"
+    local combined page target fetched want url body
+    local num_found before after got unique
+
+    combined=$(mktemp)
+    TEMP_FILES="${TEMP_FILES:-} ${combined}"
+    : > "${combined}"
+
+    SEARCH_COMPLETE=false
+    SEARCH_NUM_FOUND=0
+    SEARCH_FETCHED=0
+    page=1
+    target=0
+    fetched=0
+
+    while true; do
+        want="${IA_PAGE_SIZE}"
+        if [[ ${page} -eq 1 ]]; then
+            if [[ "${ROWS}" -lt "${want}" ]]; then
+                want="${ROWS}"
+            fi
+        else
+            want=$((target - fetched))
+            if [[ ${want} -le 0 ]]; then
+                break
+            fi
+            if [[ ${want} -gt ${IA_PAGE_SIZE} ]]; then
+                want="${IA_PAGE_SIZE}"
+            fi
+        fi
+
+        # Cap the number of pages. This is not the page size.
+        if [[ ${page} -gt 10000 ]]; then
+            print_error "Stopped after too many search pages"
+            exit 2
+        fi
+
+        url=$(build_search_url "${collection}" "${want}" "${page}")
+        if [[ ${page} -eq 1 ]]; then
+            print_info "Fetching collection metadata from Internet Archive..."
+        else
+            print_info "Fetching metadata page ${page} (${fetched} items so far)..."
+        fi
+        print_debug "URL: ${url}"
+
+        body=$(mktemp)
+        TEMP_FILES="${TEMP_FILES:-} ${body}"
+        if ! fetch_search_body "${url}" "${body}"; then
+            exit 2
+        fi
+
+        if ! jq empty "${body}" >/dev/null 2>&1; then
+            print_error "Invalid JSON response from Internet Archive"
+            exit 2
+        fi
+
+        if ! num_found=$(jq -r '.response.numFound // empty' "${body}"); then
+            print_error "Failed to parse collection data"
+            exit 2
+        fi
+        if [[ ! "${num_found}" =~ ^[0-9]+$ ]]; then
+            print_error "Search response did not include a result count"
+            exit 2
+        fi
+
+        SEARCH_NUM_FOUND="${num_found}"
+        if [[ ${num_found} -lt ${ROWS} ]]; then
+            target="${num_found}"
+        else
+            target="${ROWS}"
+        fi
+
+        if [[ ${page} -eq 1 ]]; then
+            print_info "Found ${num_found} items in collection"
+            if [[ ${num_found} -eq 0 ]]; then
+                SEARCH_COMPLETE=true
+                SEARCH_RESULTS_FILE="${combined}"
+                print_warning "No items found in collection: ${collection}"
+                return 0
+            fi
+        fi
+
+        before=$(wc -l < "${combined}" | tr -d ' ')
+        if ! append_search_docs "${body}" "${combined}"; then
+            exit 2
+        fi
+        after=$(wc -l < "${combined}" | tr -d ' ')
+        got=$((after - before))
+        rm -f "${body}"
+
+        if [[ ${got} -eq 0 ]]; then
+            if [[ ${fetched} -lt ${target} ]]; then
+                print_error "Search results ended after ${fetched} items; expected ${target}"
+                exit 2
+            fi
+            break
+        fi
+
+        fetched=$((fetched + got))
+        if [[ ${fetched} -ge ${target} ]]; then
+            break
+        fi
+        page=$((page + 1))
+    done
+
+    unique=$(awk -F '\t' 'NF && $1 != "" && !seen[$1]++ { n++ } END { print n+0 }' "${combined}")
+    SEARCH_FETCHED="${unique}"
+
+    if [[ ${SEARCH_FETCHED} -ge ${SEARCH_NUM_FOUND} ]]; then
+        SEARCH_COMPLETE=true
+    elif [[ ${fetched} -ge ${ROWS} || ${SEARCH_FETCHED} -ge ${ROWS} ]]; then
+        SEARCH_COMPLETE=false
+    else
+        print_error "Search results ended after ${SEARCH_FETCHED} items; expected ${target}"
         exit 2
     fi
 
-    # Parse JSON and extract identifiers and update dates
-    local temp_file
-    temp_file=$(mktemp)
-    TEMP_FILES="${TEMP_FILES:-} ${temp_file}"
-
-    # Validate JSON response
-    if ! echo "${json_response}" | jq empty 2>/dev/null; then
-        print_error "Invalid JSON response from Internet Archive"
-        exit 2
-    fi
-
-    local num_found
-    num_found=$(echo "${json_response}" | jq -r '.response.numFound // 0')
-    print_info "Found ${num_found} items in collection"
-
-    if [[ "${num_found}" -eq 0 ]]; then
-        print_warning "No items found in collection: ${collection}"
-        echo "${temp_file}"
-        return
-    fi
-
-    # Extract each document's identifier and latest update date
-    if ! echo "${json_response}" | jq -r '.response.docs[] | "\(.identifier)\t\(.oai_updatedate[-1])"' > "${temp_file}"; then
-        print_error "Failed to parse collection data"
-        exit 2
-    fi
-
-    local count
-    count=$(wc -l < "${temp_file}" 2>/dev/null || echo "0")
-    print_info "Parsed ${count} items from search results"
-
-    if [[ "${count}" -eq 0 ]]; then
-        print_warning "No valid items found in collection data"
-    fi
-
-    echo "${temp_file}"
+    print_info "Parsed ${SEARCH_FETCHED} items from search results"
+    SEARCH_RESULTS_FILE="${combined}"
 }
 
 # =============================================================================
@@ -957,13 +1168,20 @@ filename_excluded() {
     return 1
 }
 
-# Download a single file
+# Download one zip. A failed transfer leaves the previous zip in place.
 download_file() {
     local identifier="$1"
-    local url="$2"
-    local download_path="$3"
-    local count="$4"
-    local total="$5"
+    local download_path="$2"
+    local count="$3"
+    local total="$4"
+    local url="${IA_COMPRESS_URL}/${identifier}"
+    local partial="${download_path}.partial"
+    local -a curl_args
+
+    if ! valid_item_name "${identifier}"; then
+        print_error "[${count}/${total}] Refusing unsafe identifier: ${identifier}"
+        return 1
+    fi
 
     print_info "[${count}/${total}] Downloading: ${download_path}"
     print_debug "[${count}/${total}] From: ${url}"
@@ -973,101 +1191,396 @@ download_file() {
         return 0
     fi
 
-    # Download with progress indicator
-    if curl -L --fail -o "${download_path}" --progress-bar --connect-timeout 30 --max-time 1800 "${url}" 2>/dev/null; then
-        print_success "[${count}/${total}] Successfully downloaded: ${download_path}"
-        return 0
+    curl_args=(-L --fail --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 30 --max-time 1800 -o "${partial}")
+    if [[ "${PARALLEL_DOWNLOADS}" == "true" ]]; then
+        curl_args+=(-sS)
     else
-        print_error "[${count}/${total}] Failed to download: ${download_path}"
-        # Remove failed download
-        [[ -f "${download_path}" ]] && rm -f "${download_path}"
+        curl_args+=(--progress-bar)
+    fi
+
+    if curl "${curl_args[@]}" "${url}"; then
+        if mv -f -- "${partial}" "${download_path}"; then
+            print_success "[${count}/${total}] Successfully downloaded: ${download_path}"
+            return 0
+        fi
+        print_error "[${count}/${total}] Failed to save: ${download_path}"
+        rm -f -- "${partial}"
         return 1
     fi
+
+    print_error "[${count}/${total}] Failed to download: ${download_path}"
+    rm -f -- "${partial}"
+    return 1
 }
 
-# Download files
-download_files() {
-    local collection="$1"
-    local search_results_file="$2"
-    local local_file="${FILE_LIST_NAME}"
-    local resource_base="${IA_COMPRESS_URL}"
+# Download the rows in list_file. Successful rows land in success_file.
+perform_downloads() {
+    local list_file="$1"
+    local success_file="$2"
+    local fail_file="$3"
+    local total="$4"
     local count=0
-    local total_downloads=0
-    local successful_downloads=0
-    local failed_downloads=0
-    local skipped_names=0
-    local download_path=""
-    local url=""
+    local identifier=""
+    local update_date=""
+    local result_dir=""
+    local fifo=""
+    local slot=0
+    local ok_count=0
+    local fail_count=0
 
-    print_debug "Starting download process..."
+    : > "${success_file}"
+    : > "${fail_file}"
 
-    # Count items that still need a download. Item names that match an exclude
-    # pattern are counted separately and are not fetched.
-    while IFS=$'\t' read -r identifier update_date; do
-        if [[ -n "${identifier}" && -n "${update_date}" ]]; then
-            if item_needs_download "${identifier}" "${update_date}" "${local_file}"; then
-                if filename_excluded "${identifier}"; then
-                    skipped_names=$((skipped_names + 1))
-                else
-                    total_downloads=$((total_downloads + 1))
-                fi
-            fi
-        fi
-    done < "${search_results_file}"
-
-    if [[ "${total_downloads}" -eq 0 && "${skipped_names}" -eq 0 ]]; then
-        print_info "All items are already up to date"
+    if [[ "${total}" -eq 0 ]]; then
         return 0
     fi
 
-    if [[ "${total_downloads}" -gt 0 ]]; then
-        print_info "Found ${total_downloads} items to download"
-    fi
-    if [[ "${skipped_names}" -gt 0 ]]; then
-        print_info "Skipping ${skipped_names} items whose names match an exclude pattern"
-    fi
-
-    # Download items
-    while IFS=$'\t' read -r identifier update_date; do
-        if [[ -n "${identifier}" && -n "${update_date}" ]]; then
-            if item_needs_download "${identifier}" "${update_date}" "${local_file}"; then
-                if filename_excluded "${identifier}"; then
-                    print_info "Skipping item ${identifier} (name matches an exclude pattern)"
-                    continue
+    if [[ "${DRY_RUN}" == "true" || "${JOBS}" -le 1 || "${total}" -le 1 ]]; then
+        while IFS=$'\t' read -r identifier update_date; do
+            [[ -z "${identifier}" ]] && continue
+            count=$((count + 1))
+            if download_file "${identifier}" "${identifier}.zip" "${count}" "${total}"; then
+                if [[ "${DRY_RUN}" != "true" ]]; then
+                    printf '%s\t%s\n' "${identifier}" "${update_date}" >> "${success_file}"
                 fi
-
-                count=$((count + 1))
-                download_path="${identifier}.zip"
-                url="${resource_base}/${identifier}"
-
-                if download_file "${identifier}" "${url}" "${download_path}" "${count}" "${total_downloads}"; then
-                    if [[ "${DRY_RUN}" != "true" ]]; then
-                        add_to_local_file_list "${identifier}" "${update_date}" "${local_file}"
-                    fi
-                    successful_downloads=$((successful_downloads + 1))
-                else
-                    failed_downloads=$((failed_downloads + 1))
-                fi
+            else
+                printf '%s\n' "${identifier}" >> "${fail_file}"
             fi
-        fi
-    done < "${search_results_file}"
-
-    # Print summary
-    print_info "Download summary:"
-    print_info "  Items to download: ${total_downloads}"
-    print_success "  Successfully downloaded: ${successful_downloads}"
-    if [[ ${skipped_names} -gt 0 ]]; then
-        print_info "  Skipped item names: ${skipped_names}"
-    fi
-    if [[ ${failed_downloads} -gt 0 ]]; then
-        print_warning "  Failed downloads: ${failed_downloads}"
+        done < "${list_file}"
+        return 0
     fi
 
-    # Return appropriate exit code
-    if [[ ${failed_downloads} -gt 0 ]]; then
+    result_dir="${SYNC_WORK}/results"
+    mkdir -p "${result_dir}"
+    fifo=$(mktemp -u "${TMPDIR:-/tmp}/synccollection.fifo.XXXXXX")
+    if ! mkfifo "${fifo}"; then
+        print_error "Failed to create a download queue"
         return 1
     fi
+    exec 3<>"${fifo}"
+    rm -f "${fifo}"
+
+    PARALLEL_DOWNLOADS=true
+    while [[ ${slot} -lt ${JOBS} ]]; do
+        printf '\n' >&3
+        slot=$((slot + 1))
+    done
+
+    while IFS=$'\t' read -r identifier update_date; do
+        [[ -z "${identifier}" ]] && continue
+        count=$((count + 1))
+        IFS= read -r -u 3
+        (
+            set +e
+            trap - EXIT INT TERM
+            trap 'printf "\n" >&3' EXIT
+            if download_file "${identifier}" "${identifier}.zip" "${count}" "${total}"; then
+                printf '%s\t%s\n' "${identifier}" "${update_date}" > "${result_dir}/${count}.ok"
+            else
+                printf '%s\n' "${identifier}" > "${result_dir}/${count}.fail"
+            fi
+        ) &
+    done < "${list_file}"
+
+    wait || true
+    exec 3>&- || true
+    exec 3<&- || true
+    PARALLEL_DOWNLOADS=false
+
+    find "${result_dir}" -name '*.ok' -exec cat {} \; >> "${success_file}" 2>/dev/null || true
+    find "${result_dir}" -name '*.fail' -exec cat {} \; >> "${fail_file}" 2>/dev/null || true
+
+    ok_count=$(awk 'NF { n++ } END { print n+0 }' "${success_file}")
+    fail_count=$(awk 'NF { n++ } END { print n+0 }' "${fail_file}")
+    if [[ $((ok_count + fail_count)) -lt ${total} ]]; then
+        print_warning "$((total - ok_count - fail_count)) downloads did not report a result"
+    fi
     return 0
+}
+
+# Local zips to delete. Reason is "excluded" or "not in the collection".
+build_removal_list() {
+    local remote_ids="$1"
+    local local_ids="$2"
+    local excluded_ids="$3"
+    local mirror="$4"
+
+    {
+        echo "#REMOTE"
+        cat "${remote_ids}"
+        echo "#LOCAL"
+        cat "${local_ids}"
+        echo "#EXCLUDE"
+        cat "${excluded_ids}"
+    } | awk -F '\t' -v OFS='\t' -v mirror="${mirror}" '
+        $0 == "#REMOTE" { section = "remote"; next }
+        $0 == "#LOCAL" { section = "local"; next }
+        $0 == "#EXCLUDE" { section = "exclude"; next }
+        section == "remote" { if ($1 != "") remote[$1] = 1; next }
+        section == "local" { if ($1 != "") local[$1] = 1; next }
+        section == "exclude" { if ($1 != "") exclude[$1] = 1; next }
+        END {
+            for (id in local) {
+                if (exclude[id]) {
+                    print id, "excluded"
+                } else if (mirror == 1 && !remote[id]) {
+                    print id, "not in the collection"
+                }
+            }
+        }
+    ' | sort -t $'\t' -k1,1
+}
+
+# Rewrite fileList.txt from the items this run decided to keep.
+# complete=1 drops stored rows whose items were not fetched.
+# complete=0 keeps stored rows outside this fetch, except excluded names.
+write_file_list() {
+    local dest="$1"
+    local excluded_ids="$2"
+    local fail_ids="$3"
+    local keep_rows="$4"
+    local success_rows="$5"
+    local old_list="$6"
+    local complete="$7"
+    local tmp="${dest}.tmp"
+
+    {
+        echo "#DROP"
+        cat "${excluded_ids}"
+        echo "#FAIL"
+        cat "${fail_ids}"
+        echo "#KEEP"
+        cat "${keep_rows}"
+        echo "#OK"
+        cat "${success_rows}"
+        echo "#OLD"
+        if [[ -f "${old_list}" ]]; then
+            cat "${old_list}"
+        fi
+    } | awk -F '\t' -v OFS='\t' -v complete="${complete}" '
+        $0 == "#DROP" { section = "drop"; next }
+        $0 == "#FAIL" { section = "fail"; next }
+        $0 == "#KEEP" { section = "keep"; next }
+        $0 == "#OK" { section = "ok"; next }
+        $0 == "#OLD" { section = "old"; next }
+        section == "drop" { if ($1 != "") drop[$1] = 1; next }
+        section == "fail" { if ($1 != "") fail[$1] = 1; next }
+        section == "keep" || section == "ok" {
+            if ($1 != "" && !drop[$1]) {
+                date[$1] = $2
+                want[$1] = 1
+            }
+            next
+        }
+        section == "old" {
+            if ($1 == "" || drop[$1]) {
+                next
+            }
+            if (complete == 1) {
+                if (fail[$1] && !($1 in want)) {
+                    date[$1] = $2
+                    want[$1] = 1
+                }
+            } else if (!($1 in want)) {
+                date[$1] = $2
+                want[$1] = 1
+            }
+        }
+        END {
+            for (id in want) {
+                if (want[id]) {
+                    print id, date[id]
+                }
+            }
+        }
+    ' | sort -t $'\t' -k1,1 > "${tmp}"
+
+    mv -f -- "${tmp}" "${dest}"
+}
+
+# Download what changed, delete what should not remain, then rewrite the file list.
+sync_files() {
+    local search_results_file="$1"
+    local work file_list mirror_removals action id remote old existing
+    local download_count exclude_count success_count fail_count
+    local removal_count removed_ok removal_failed complete_flag status
+    local reason
+
+    work=$(mktemp -d "${TMPDIR:-/tmp}/synccollection.XXXXXX")
+    SYNC_WORK="${work}"
+    file_list="${FILE_LIST_NAME}"
+    if [[ ! -f "${file_list}" ]]; then
+        file_list="${work}/empty-list"
+        : > "${file_list}"
+    fi
+
+    list_local_zip_ids | sort -u > "${work}/local_ids.txt"
+    classify_items "${file_list}" "${work}/local_ids.txt" "${search_results_file}" > "${work}/plan.tsv"
+
+    : > "${work}/remote_ids.txt"
+    : > "${work}/excluded_ids.txt"
+    : > "${work}/to_download.tsv"
+    : > "${work}/to_keep.tsv"
+
+    mirror_removals=true
+    if [[ "${SEARCH_COMPLETE}" != "true" ]]; then
+        mirror_removals=false
+    fi
+
+    while IFS=$'\t' read -r action id remote old; do
+        [[ -z "${id}" ]] && continue
+        if ! valid_item_name "${id}"; then
+            mirror_removals=false
+            print_warning "Skipping unusual identifier from the collection: ${id}"
+            continue
+        fi
+        printf '%s\n' "${id}" >> "${work}/remote_ids.txt"
+        if filename_excluded "${id}"; then
+            printf '%s\n' "${id}" >> "${work}/excluded_ids.txt"
+            continue
+        fi
+        case "${action}" in
+            download)
+                printf '%s\t%s\n' "${id}" "${remote}" >> "${work}/to_download.tsv"
+                ;;
+            keep|nodate)
+                if [[ -n "${old}" ]]; then
+                    printf '%s\t%s\n' "${id}" "${old}" >> "${work}/to_keep.tsv"
+                elif [[ -n "${remote}" ]]; then
+                    printf '%s\t%s\n' "${id}" "${remote}" >> "${work}/to_keep.tsv"
+                fi
+                ;;
+        esac
+    done < "${work}/plan.tsv"
+
+    while IFS= read -r existing; do
+        [[ -z "${existing}" ]] && continue
+        if filename_excluded "${existing}"; then
+            printf '%s\n' "${existing}" >> "${work}/excluded_ids.txt"
+        fi
+    done < "${work}/local_ids.txt"
+
+    while IFS=$'\t' read -r existing _; do
+        [[ -z "${existing}" ]] && continue
+        if valid_item_name "${existing}" && filename_excluded "${existing}"; then
+            printf '%s\n' "${existing}" >> "${work}/excluded_ids.txt"
+        fi
+    done < "${file_list}"
+
+    sort -u -o "${work}/excluded_ids.txt" "${work}/excluded_ids.txt"
+    sort -u -o "${work}/remote_ids.txt" "${work}/remote_ids.txt"
+
+    download_count=$(awk 'NF { n++ } END { print n+0 }' "${work}/to_download.tsv")
+    exclude_count=$(awk 'NF { n++ } END { print n+0 }' "${work}/excluded_ids.txt")
+
+    if [[ "${download_count}" -gt 0 ]]; then
+        print_info "Found ${download_count} items to download"
+    fi
+    if [[ "${exclude_count}" -gt 0 ]]; then
+        print_info "Excluding ${exclude_count} item names"
+    fi
+
+    if [[ "${mirror_removals}" == "true" ]]; then
+        if [[ "${SEARCH_NUM_FOUND}" -eq 0 ]]; then
+            print_warning "The collection is empty. Local zips in this folder will be removed."
+        else
+            print_info "Fetched all ${SEARCH_NUM_FOUND} items. Zips for items that have left the collection will be removed."
+        fi
+    elif [[ "${SEARCH_COMPLETE}" != "true" ]]; then
+        print_warning "Fetched ${SEARCH_FETCHED} of ${SEARCH_NUM_FOUND} items because of the row limit. Zips outside this fetch are kept. Excluded names already on disk are still removed. Pass at least ${SEARCH_NUM_FOUND} rows to mirror the whole collection."
+    else
+        print_warning "Some identifiers could not be handled safely, so zips for items that have left the collection will be kept."
+    fi
+
+    if ! perform_downloads "${work}/to_download.tsv" "${work}/success.tsv" "${work}/fail.tsv" "${download_count}"; then
+        SYNC_WORK=""
+        rm -rf "${work}"
+        return 1
+    fi
+
+    if [[ "${mirror_removals}" == "true" ]]; then
+        build_removal_list "${work}/remote_ids.txt" "${work}/local_ids.txt" "${work}/excluded_ids.txt" 1 > "${work}/removals.tsv"
+    else
+        build_removal_list "${work}/remote_ids.txt" "${work}/local_ids.txt" "${work}/excluded_ids.txt" 0 > "${work}/removals.tsv"
+    fi
+
+    removal_count=0
+    removed_ok=0
+    removal_failed=0
+    while IFS=$'\t' read -r id reason; do
+        [[ -z "${id}" ]] && continue
+        if [[ ! -f "${id}.zip" ]]; then
+            continue
+        fi
+        removal_count=$((removal_count + 1))
+        if [[ "${DRY_RUN}" == "true" ]]; then
+            print_info "Would remove ${id}.zip (${reason})"
+        elif rm -f -- "${id}.zip"; then
+            print_info "Removed ${id}.zip (${reason})"
+            removed_ok=$((removed_ok + 1))
+        else
+            print_error "Failed to remove ${id}.zip"
+            removal_failed=$((removal_failed + 1))
+        fi
+    done < "${work}/removals.tsv"
+
+    success_count=$(awk 'NF { n++ } END { print n+0 }' "${work}/success.tsv")
+    fail_count=$(awk 'NF { n++ } END { print n+0 }' "${work}/fail.tsv")
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        success_count=0
+        fail_count=0
+    elif [[ $((success_count + fail_count)) -lt ${download_count} ]]; then
+        fail_count=$((download_count - success_count))
+    fi
+
+    if [[ "${DRY_RUN}" != "true" ]]; then
+        complete_flag=0
+        if [[ "${mirror_removals}" == "true" ]]; then
+            complete_flag=1
+        fi
+        write_file_list "${FILE_LIST_NAME}" \
+            "${work}/excluded_ids.txt" \
+            "${work}/fail.tsv" \
+            "${work}/to_keep.tsv" \
+            "${work}/success.tsv" \
+            "${file_list}" \
+            "${complete_flag}"
+    fi
+
+    print_info "Sync summary:"
+    print_info "  Items fetched: ${SEARCH_FETCHED} of ${SEARCH_NUM_FOUND}"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        print_info "  Would download: ${download_count}"
+        print_info "  Would remove: ${removal_count}"
+    else
+        print_success "  Downloaded: ${success_count}"
+        if [[ ${fail_count} -gt 0 ]]; then
+            print_warning "  Failed downloads: ${fail_count}"
+        fi
+        print_info "  Removed: ${removed_ok}"
+        if [[ ${removal_failed} -gt 0 ]]; then
+            print_warning "  Failed removals: ${removal_failed}"
+        fi
+    fi
+    if [[ ${exclude_count} -gt 0 ]]; then
+        print_info "  Excluded names: ${exclude_count}"
+    fi
+    if [[ "${DRY_RUN}" != "true" && ${download_count} -eq 0 && ${removal_count} -eq 0 && ${fail_count} -eq 0 && ${removal_failed} -eq 0 ]]; then
+        if [[ "${mirror_removals}" == "true" ]]; then
+            print_info "Collection is already in sync"
+        elif [[ "${SEARCH_COMPLETE}" != "true" ]]; then
+            print_info "No changes in this fetch"
+        fi
+    fi
+
+    status=0
+    if [[ ${fail_count} -gt 0 || ${removal_failed} -gt 0 ]]; then
+        status=1
+    fi
+
+    SYNC_WORK=""
+    rm -rf "${work}"
+    return "${status}"
 }
 
 # =============================================================================
@@ -1087,15 +1600,14 @@ process_collection() {
     # Create collection directory
     create_collection_directory "${collection}"
 
-    # Archive old download list
-    archive_old_download_list "${collection}"
+    # Fetch the catalog in this shell. A command substitution would discard
+    # SEARCH_COMPLETE and the result counts. A failed fetch leaves the
+    # collection folder unchanged.
+    get_search_results "${collection}"
 
-    # Get search results
-    local search_results_file
-    search_results_file=$(get_search_results "${collection}")
+    archive_old_download_list
 
-    # Download files
-    if download_files "${collection}" "${search_results_file}"; then
+    if sync_files "${SEARCH_RESULTS_FILE}"; then
         print_success "Collection '${collection}' processed successfully!"
         return 0
     else
@@ -1109,7 +1621,9 @@ process_collection() {
 # =============================================================================
 
 main() {
-    print_info "${BOLD}${SCRIPT_NAME} v${SCRIPT_VERSION}${RESET} - Internet Archive Collection Downloader"
+    START_DIR=$(pwd)
+
+    print_info "${BOLD}${SCRIPT_NAME} v${SCRIPT_VERSION}${RESET} - Internet Archive Collection Sync"
     print_info "========================================================"
     print_info "BASH port by: ${SCRIPT_AUTHOR}"
     print_info "Original .NET version by: ${ORIGINAL_AUTHOR}"
@@ -1129,11 +1643,15 @@ main() {
 
     print_info "Processing ${total_collections} collection(s): ${COLLECTIONS[*]}"
     print_info "Using ${ROWS} rows per collection"
+    print_info "Concurrent downloads: ${JOBS}"
     if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
         print_info "Excluding item names that match:"
         local exclude_pattern
         for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
             print_info "  ${exclude_pattern}"
+            if [[ "${exclude_pattern}" == "*" ]]; then
+                print_warning "This pattern matches every item name. Matching zips already on disk will be removed."
+            fi
         done
     fi
     if [[ -n "${ROOT_DIR}" ]]; then

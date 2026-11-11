@@ -52,14 +52,16 @@ A robust BASH script for downloading Internet Archive collections with resume ca
 **BASH port by:** Paul Lee
 
 **Features:**
-- ✅ **Resume Capability** - Syncs from `fileList.txt`. A newer remote item overwrites its zip; the same date leaves the local zip in place
+- ✅ **Resume Capability** - Syncs from `fileList.txt`. A newer remote item, a missing row, or a missing zip is downloaded again
+- ✅ **Mirror** - Once the whole collection has been fetched, local zips whose items have left the collection are deleted
 - ✅ **Progress Tracking** - Real-time download progress and statistics
 - ✅ **Error Handling** - Comprehensive error handling with meaningful messages
-- ✅ **Dry Run Mode** - Preview the sync without saving zips or updating `fileList.txt`
+- ✅ **Dry Run Mode** - Preview downloads and removals without changing files
 - ✅ **Verbose Logging** - Detailed debug information when needed
 - ✅ **Input Validation** - Validates collection names and row counts
 - ✅ **Retry Logic** - Automatic retry for failed network requests
-- ✅ **Exclude Patterns** - Skip item names that match a shell glob. Each download is still one zip
+- ✅ **Exclude Patterns** - Skip matching item names, and delete matching zips already on disk
+- ✅ **Concurrent Downloads** - Fetch up to 4 items at once (`--jobs`, maximum 8)
 - ✅ **Cleanup** - Automatic cleanup of temporary files
 
 **Usage:**
@@ -71,7 +73,8 @@ A robust BASH script for downloading Internet Archive collections with resume ca
 
 # Advanced usage
 ./synccollection.sh --verbose 100 softwarelibrary     # Verbose mode
-./synccollection.sh --dry-run 10 softwarelibrary      # Preview downloads
+./synccollection.sh --jobs 1 100 softwarelibrary      # Download one item at a time
+./synccollection.sh --dry-run 10 softwarelibrary      # Preview downloads and removals
 ./synccollection.sh --exclude '*demo*' --exclude '*beta*' 50 softwarelibrary
 ./synccollection.sh --root-dir /Volumes/Data/IA 50 softwarelibrary
 ./synccollection.sh --exclude '*demo*' --root-dir /Volumes/Data/IA 50 softwarelibrary
@@ -82,15 +85,16 @@ A robust BASH script for downloading Internet Archive collections with resume ca
 **Options:**
 - `-h, --help`: Show help message and exit
 - `-v, --verbose`: Enable verbose output
-- `-n, --dry-run`: Preview the sync. No zip is saved and `fileList.txt` is not updated
+- `-n, --dry-run`: Preview the sync. Nothing is saved, removed, or recorded
 - `-r, --root-dir DIR`: Directory for collection folders (default: current directory). Created if missing
-- `-x, --exclude PAT`: Skip an item whose name matches PAT (shell glob, repeatable). Quote patterns. Do not add `.zip`
+- `-x, --exclude PAT`: Skip an item whose name matches PAT (shell glob, repeatable). Quote patterns. Do not add `.zip`. A matching zip already on disk is deleted
+- `-j, --jobs N`: Download N items at the same time (default: 4, maximum: 8)
 - `-V, --version`: Show version information and exit
 
 Options may appear in any order. The directory must follow `--root-dir`, and the pattern must follow each `--exclude`. A row count must be the first positional argument.
 
 **Arguments:**
-- `rows`: Number of items to sync (default: 50000, max: 100000)
+- `rows`: Number of items to fetch (default: 50000, max: 100000). Zips for items that left the collection are removed only when this covers the whole collection. Excluded names are removed either way
 - `collection`: Collection identifier (default: apple_ii_library_4am). More than one may be given
 
 **Requirements:**
