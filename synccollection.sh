@@ -10,7 +10,7 @@
 # ORIGINAL LICENSE: MIT License
 #
 # BASH PORT AUTHOR: Paul Lee
-# BASH PORT VERSION: 1.0.0
+# BASH PORT VERSION: 1.1.1
 # BASH PORT LICENSE: MIT License
 # BASH PORT REPOSITORY: https://github.com/paullee/Bash
 #
@@ -24,11 +24,12 @@
 # ✅ Resume Capability - Only downloads new or updated items
 # ✅ Progress Tracking - Real-time download progress and statistics
 # ✅ Error Handling - Comprehensive error handling with meaningful messages
-# ✅ Dry Run Mode - Preview what would be downloaded without actually downloading
+# ✅ Dry Run Mode - Preview the sync without saving zips or updating fileList.txt
 # ✅ Verbose Logging - Detailed debug information when needed
 # ✅ Input Validation - Validates collection names and row counts
 # ✅ Retry Logic - Automatic retry for failed network requests
 # ✅ Cleanup - Automatic cleanup of temporary files
+# ✅ Exclude Patterns - Skip items whose names match a shell glob
 # ✅ Cross-Platform - Works on macOS and other Unix-like systems
 #
 # =============================================================================
@@ -42,18 +43,26 @@
 #
 # Advanced Usage:
 #   ./synccollection.sh --verbose 100 softwarelibrary     # Verbose mode with 100 items
-#   ./synccollection.sh --dry-run 10 softwarelibrary      # Preview what would be downloaded
+#   ./synccollection.sh --dry-run 10 softwarelibrary      # Preview the sync without saving files
+#   ./synccollection.sh --exclude '*demo*' --exclude '*beta*' 50 softwarelibrary
+#   ./synccollection.sh --dry-run --exclude '*demo*' 10 apple_ii_library_4am
 #   ./synccollection.sh --help                            # Show help
 #   ./synccollection.sh --version                         # Show version
 #
 # Command Line Options:
 #   -h, --help      Show help message and exit
 #   -v, --verbose   Enable verbose output
-#   -n, --dry-run   Show what would be downloaded without actually downloading
+#   -n, --dry-run   Preview the sync. No zip is saved and fileList.txt is not updated
+#   -r, --root-dir  Directory for collection folders (default: current directory)
+#   -x, --exclude   Skip items whose names match a shell glob (repeatable)
 #   -V, --version   Show version information and exit
 #
+# Options may appear in any order. The directory must follow --root-dir, and
+# the pattern must follow each --exclude. A row count must be the first
+# positional argument, before any collection name.
+#
 # Arguments:
-#   rows        Number of items to download (default: 30000, max: 100000)
+#   rows        Number of items to sync (default: 50000, max: 100000)
 #   collection  Collection identifier (default: apple_ii_library_4am)
 #
 # Popular Collections:
@@ -87,15 +96,25 @@
 # Download first 50 items from the Software Library:
 #   ./synccollection.sh 50 softwarelibrary
 #
-# Preview what would be downloaded (dry run):
+# Preview the sync without saving zips or updating fileList.txt:
 #   ./synccollection.sh --dry-run 10 softwarelibrary
 #
 # Verbose mode with detailed logging:
 #   ./synccollection.sh --verbose 100 softwarelibrary
 #
-# Download to a specific root directory:
+# Skip items whose names match a pattern. Each saved file is still one zip,
+# and the pattern does not need a .zip suffix:
+#   ./synccollection.sh --exclude '*demo*' --exclude '*beta*' 50 softwarelibrary
+#
+# Preview which item names would be skipped:
+#   ./synccollection.sh --dry-run --exclude '*demo*' 10 apple_ii_library_4am
+#
+# Download to a specific root directory. The directory is created if needed:
 #   ./synccollection.sh --root-dir /path/to/collections
 #   ./synccollection.sh -r /Volumes/Data/IA 50 softwarelibrary
+#
+# Root directory and exclude patterns can be combined, in any option order:
+#   ./synccollection.sh --exclude '*demo*' --root-dir /Volumes/Data/IA 50 softwarelibrary
 #
 # =============================================================================
 # HOW IT WORKS
@@ -104,18 +123,26 @@
 # 1. Validation - Validates command line arguments and system dependencies
 # 2. Metadata Fetching - Retrieves collection metadata from Internet Archive API
 # 3. State Management - Maintains local file list (fileList.txt) to track downloads
-# 4. Smart Downloading - Only downloads new or updated items
-# 5. Progress Tracking - Shows real-time progress and statistics
-# 6. Error Handling - Gracefully handles network errors and failed downloads
-# 7. Cleanup - Automatically cleans up temporary files
+# 4. Smart Downloading - Compares each remote update date with fileList.txt
+#    - Same or older remote date: leave the existing zip in place
+#    - Newer remote date: download again and overwrite <identifier>.zip
+#    - Not listed in fileList.txt: download, overwriting a zip of the same name
+#    - A zip copied in by hand is not treated as already synced
+#    - Local files are kept when an item disappears from the collection
+# 5. Exclude Filtering - Optional shell globs skip matching item names.
+#    Patterns are case-sensitive, match the item name, and do not need .zip.
+#    They do not look inside the archive. Skipped items are not recorded, so
+#    they are checked again on the next run.
+# 6. Progress Tracking - Shows real-time progress and statistics
+# 7. Error Handling - Gracefully handles network errors and failed downloads
+# 8. Cleanup - Automatically cleans up temporary files
 #
 # File Structure:
 #   collection_name/
 #   ├── fileList.txt          # Local tracking file (tab-separated: identifier, update_date)
 #   ├── fileListOld.txt       # Previous version (backup)
 #   ├── item1.zip             # Downloaded items
-#   ├── item2.zip
-#   └── ...
+#   └── item2.zip
 #
 # =============================================================================
 # EXIT CODES
@@ -147,7 +174,7 @@
 # Debug Mode:
 #   ./synccollection.sh --verbose 10 softwarelibrary
 #
-# Dry Run Mode:
+# Dry Run Mode (no zips saved, fileList.txt unchanged):
 #   ./synccollection.sh --dry-run 10 softwarelibrary
 #
 # =============================================================================
@@ -188,7 +215,7 @@ set -euo pipefail
 SCRIPT_NAME=""
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.1"
 readonly SCRIPT_VERSION
 SCRIPT_AUTHOR="Paul Lee"
 readonly SCRIPT_AUTHOR
@@ -206,7 +233,7 @@ readonly ORIGINAL_LICENSE
 # Default values
 DEFAULT_COLLECTION="apple_ii_library_4am"
 readonly DEFAULT_COLLECTION
-DEFAULT_ROWS="30000"
+DEFAULT_ROWS="50000"
 readonly DEFAULT_ROWS
 DEFAULT_ROOT_DIR=""  # Empty means current directory
 readonly DEFAULT_ROOT_DIR
@@ -255,6 +282,7 @@ ROWS=""
 ROOT_DIR=""
 VERBOSE=false
 DRY_RUN=false
+EXCLUDE_PATTERNS=()
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -289,8 +317,22 @@ show_usage() {
 ${BOLD}${SCRIPT_NAME} v${SCRIPT_VERSION}${RESET} - Internet Archive Collection Downloader
 
 ${BOLD}DESCRIPTION:${RESET}
-    Download collections from the Internet Archive with resume capability.
-    Only downloads new or updated items, skipping already downloaded files.
+    Download collections from the Internet Archive. Each item is saved as
+    <identifier>.zip. Sync state is the update date stored in fileList.txt,
+    in the collection folder:
+
+    - The same or an older remote date leaves the existing zip in place.
+    - A newer remote date downloads the zip again and overwrites it.
+    - An item missing from fileList.txt is downloaded. A zip of the same
+      name is overwritten, including one copied in by hand.
+    - --exclude matches the item name, not files inside the zip. Do not add
+      .zip to the pattern. Matches are not recorded and are checked again
+      on the next run.
+    - Local files are kept when an item disappears from the collection.
+
+    Options may appear in any order. The path must follow --root-dir, and
+    the pattern must follow each --exclude. A row count must be the first
+    positional argument, before any collection name.
 
     ${BOLD}Original .NET version by:${RESET} ${ORIGINAL_AUTHOR}
     ${BOLD}Original repository:${RESET} ${ORIGINAL_REPOSITORY}
@@ -307,8 +349,15 @@ ${BOLD}ARGUMENTS:${RESET}
 ${BOLD}OPTIONS:${RESET}
     -h, --help         Show this help message and exit
     -v, --verbose      Enable verbose output
-    -n, --dry-run      Show what would be downloaded without actually downloading
-    -r, --root-dir     Root directory for collection folders (default: current directory)
+    -n, --dry-run      Preview the sync. No zip is saved and fileList.txt is not updated
+    -r, --root-dir DIR Collection folders are created under DIR (default: current directory).
+                       DIR is created if it does not exist
+    -x, --exclude PAT  Skip an item when its name matches PAT (shell glob).
+                       Repeat for more patterns. Quote patterns so the shell
+                       does not expand them. Patterns are case-sensitive and
+                       match the item name. You do not need to add .zip.
+                       Matching items are not downloaded. Every other item is
+                       still saved as one zip.
     -V, --version      Show version information and exit
 
 ${BOLD}EXAMPLES:${RESET}
@@ -318,9 +367,12 @@ ${BOLD}EXAMPLES:${RESET}
     ${SCRIPT_NAME} collection1 collection2           # Download multiple collections
     ${SCRIPT_NAME} 100 coll1 coll2 coll3             # Download 100 items from 3 collections
     ${SCRIPT_NAME} --verbose 100 softwarelibrary     # Verbose mode with 100 items
-    ${SCRIPT_NAME} --dry-run 10 softwarelibrary      # Preview what would be downloaded
-    ${SCRIPT_NAME} --root-dir /path/to/collections   # Download to specific root directory
+    ${SCRIPT_NAME} --dry-run 10 softwarelibrary      # Preview the sync without saving files
+    ${SCRIPT_NAME} --exclude '*demo*' --exclude '*beta*' 50 softwarelibrary
+    ${SCRIPT_NAME} --dry-run --exclude '*demo*' 10 apple_ii_library_4am
+    ${SCRIPT_NAME} --root-dir /path/to/collections   # Download to a specific root directory
     ${SCRIPT_NAME} -r /Volumes/Data/IA 50 softwarelibrary  # Download 50 items to /Volumes/Data/IA
+    ${SCRIPT_NAME} --exclude '*demo*' --root-dir /Volumes/Data/IA 50 softwarelibrary
 
 ${BOLD}POPULAR COLLECTIONS:${RESET}
     apple_ii_library_4am    Apple II Library 4am collection
@@ -534,7 +586,7 @@ parse_arguments() {
                 ;;
             -n|--dry-run)
                 DRY_RUN=true
-                print_info "Dry run mode enabled - no files will be downloaded"
+                print_info "Dry run mode enabled - no zips will be saved and fileList.txt will not be updated"
                 ;;
             -r|--root-dir)
                 if [[ $((i + 1)) -ge ${#args[@]} ]]; then
@@ -544,6 +596,20 @@ parse_arguments() {
                 ROOT_DIR="${args[$((i + 1))]}"
                 print_debug "Root directory set to: ${ROOT_DIR}"
                 i=$((i + 1))  # Skip the next argument as it's the directory path
+                ;;
+            -x|--exclude)
+                if [[ $((i + 1)) -ge ${#args[@]} ]]; then
+                    print_error "Error: --exclude requires a pattern"
+                    exit 1
+                fi
+                local exclude_pattern="${args[$((i + 1))]}"
+                if [[ -z "${exclude_pattern}" ]]; then
+                    print_error "Error: --exclude pattern must not be empty"
+                    exit 1
+                fi
+                EXCLUDE_PATTERNS+=("${exclude_pattern}")
+                print_debug "Exclude pattern: ${exclude_pattern}"
+                i=$((i + 1))  # Skip the next argument as it's the pattern
                 ;;
             -V|--version)
                 show_version
@@ -628,6 +694,9 @@ parse_arguments() {
         fi
     done
 
+    if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
+        print_debug "Exclude patterns: ${EXCLUDE_PATTERNS[*]}"
+    fi
     print_debug "Parsed arguments: collections='${COLLECTIONS[*]}', rows='${ROWS}'"
 }
 
@@ -868,6 +937,26 @@ get_search_results() {
 # DOWNLOAD FUNCTIONS
 # =============================================================================
 
+# Return 0 when the item name matches an exclude pattern.
+# The pattern is compared to the item identifier. The .zip suffix on the
+# saved file is not part of the name, so patterns do not need to end in .zip.
+filename_excluded() {
+    local name="$1"
+    local pattern
+
+    if [[ ${#EXCLUDE_PATTERNS[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        # shellcheck disable=SC2254
+        if [[ "${name}" == ${pattern} ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Download a single file
 download_file() {
     local identifier="$1"
@@ -885,7 +974,7 @@ download_file() {
     fi
 
     # Download with progress indicator
-    if curl -L -o "${download_path}" --progress-bar --connect-timeout 30 --max-time 1800 "${url}" 2>/dev/null; then
+    if curl -L --fail -o "${download_path}" --progress-bar --connect-timeout 30 --max-time 1800 "${url}" 2>/dev/null; then
         print_success "[${count}/${total}] Successfully downloaded: ${download_path}"
         return 0
     else
@@ -906,35 +995,55 @@ download_files() {
     local total_downloads=0
     local successful_downloads=0
     local failed_downloads=0
+    local skipped_names=0
+    local download_path=""
+    local url=""
 
     print_debug "Starting download process..."
 
-    # Count total items to download
+    # Count items that still need a download. Item names that match an exclude
+    # pattern are counted separately and are not fetched.
     while IFS=$'\t' read -r identifier update_date; do
         if [[ -n "${identifier}" && -n "${update_date}" ]]; then
             if item_needs_download "${identifier}" "${update_date}" "${local_file}"; then
-                total_downloads=$((total_downloads + 1))
+                if filename_excluded "${identifier}"; then
+                    skipped_names=$((skipped_names + 1))
+                else
+                    total_downloads=$((total_downloads + 1))
+                fi
             fi
         fi
     done < "${search_results_file}"
 
-    print_info "Found ${total_downloads} items to download"
-
-    if [[ "${total_downloads}" -eq 0 ]]; then
+    if [[ "${total_downloads}" -eq 0 && "${skipped_names}" -eq 0 ]]; then
         print_info "All items are already up to date"
         return 0
+    fi
+
+    if [[ "${total_downloads}" -gt 0 ]]; then
+        print_info "Found ${total_downloads} items to download"
+    fi
+    if [[ "${skipped_names}" -gt 0 ]]; then
+        print_info "Skipping ${skipped_names} items whose names match an exclude pattern"
     fi
 
     # Download items
     while IFS=$'\t' read -r identifier update_date; do
         if [[ -n "${identifier}" && -n "${update_date}" ]]; then
             if item_needs_download "${identifier}" "${update_date}" "${local_file}"; then
+                if filename_excluded "${identifier}"; then
+                    print_info "Skipping item ${identifier} (name matches an exclude pattern)"
+                    continue
+                fi
+
                 count=$((count + 1))
-                local download_path="${identifier}.zip"
-                local url="${resource_base}/${identifier}"
+                download_path="${identifier}.zip"
+                url="${resource_base}/${identifier}"
 
                 if download_file "${identifier}" "${url}" "${download_path}" "${count}" "${total_downloads}"; then
-                    add_to_local_file_list "${identifier}" "${update_date}" "${local_file}"
+                    if [[ "${DRY_RUN}" != "true" ]]; then
+                        add_to_local_file_list "${identifier}" "${update_date}" "${local_file}"
+                    fi
                     successful_downloads=$((successful_downloads + 1))
                 else
                     failed_downloads=$((failed_downloads + 1))
@@ -945,8 +1054,11 @@ download_files() {
 
     # Print summary
     print_info "Download summary:"
-    print_info "  Total items processed: ${total_downloads}"
+    print_info "  Items to download: ${total_downloads}"
     print_success "  Successfully downloaded: ${successful_downloads}"
+    if [[ ${skipped_names} -gt 0 ]]; then
+        print_info "  Skipped item names: ${skipped_names}"
+    fi
     if [[ ${failed_downloads} -gt 0 ]]; then
         print_warning "  Failed downloads: ${failed_downloads}"
     fi
@@ -1017,6 +1129,13 @@ main() {
 
     print_info "Processing ${total_collections} collection(s): ${COLLECTIONS[*]}"
     print_info "Using ${ROWS} rows per collection"
+    if [[ ${#EXCLUDE_PATTERNS[@]} -gt 0 ]]; then
+        print_info "Excluding item names that match:"
+        local exclude_pattern
+        for exclude_pattern in "${EXCLUDE_PATTERNS[@]}"; do
+            print_info "  ${exclude_pattern}"
+        done
+    fi
     if [[ -n "${ROOT_DIR}" ]]; then
         print_info "Root directory: ${ROOT_DIR}"
     else

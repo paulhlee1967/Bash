@@ -52,13 +52,14 @@ A robust BASH script for downloading Internet Archive collections with resume ca
 **BASH port by:** Paul Lee
 
 **Features:**
-- ✅ **Resume Capability** - Only downloads new or updated items
-- ✅ **Progress Tracking** - Real-time download progress and statistics  
+- ✅ **Resume Capability** - Syncs from `fileList.txt`. A newer remote item overwrites its zip; the same date leaves the local zip in place
+- ✅ **Progress Tracking** - Real-time download progress and statistics
 - ✅ **Error Handling** - Comprehensive error handling with meaningful messages
-- ✅ **Dry Run Mode** - Preview what would be downloaded without actually downloading
+- ✅ **Dry Run Mode** - Preview the sync without saving zips or updating `fileList.txt`
 - ✅ **Verbose Logging** - Detailed debug information when needed
 - ✅ **Input Validation** - Validates collection names and row counts
 - ✅ **Retry Logic** - Automatic retry for failed network requests
+- ✅ **Exclude Patterns** - Skip item names that match a shell glob. Each download is still one zip
 - ✅ **Cleanup** - Automatic cleanup of temporary files
 
 **Usage:**
@@ -71,6 +72,9 @@ A robust BASH script for downloading Internet Archive collections with resume ca
 # Advanced usage
 ./synccollection.sh --verbose 100 softwarelibrary     # Verbose mode
 ./synccollection.sh --dry-run 10 softwarelibrary      # Preview downloads
+./synccollection.sh --exclude '*demo*' --exclude '*beta*' 50 softwarelibrary
+./synccollection.sh --root-dir /Volumes/Data/IA 50 softwarelibrary
+./synccollection.sh --exclude '*demo*' --root-dir /Volumes/Data/IA 50 softwarelibrary
 ./synccollection.sh --help                            # Show help
 ./synccollection.sh --version                         # Show version
 ```
@@ -78,12 +82,16 @@ A robust BASH script for downloading Internet Archive collections with resume ca
 **Options:**
 - `-h, --help`: Show help message and exit
 - `-v, --verbose`: Enable verbose output
-- `-n, --dry-run`: Show what would be downloaded without actually downloading
+- `-n, --dry-run`: Preview the sync. No zip is saved and `fileList.txt` is not updated
+- `-r, --root-dir DIR`: Directory for collection folders (default: current directory). Created if missing
+- `-x, --exclude PAT`: Skip an item whose name matches PAT (shell glob, repeatable). Quote patterns. Do not add `.zip`
 - `-V, --version`: Show version information and exit
 
+Options may appear in any order. The directory must follow `--root-dir`, and the pattern must follow each `--exclude`. A row count must be the first positional argument.
+
 **Arguments:**
-- `rows`: Number of items to download (default: 30000, max: 100000)
-- `collection`: Collection identifier (default: apple_ii_library_4am)
+- `rows`: Number of items to sync (default: 50000, max: 100000)
+- `collection`: Collection identifier (default: apple_ii_library_4am). More than one may be given
 
 **Requirements:**
 - `curl` (usually pre-installed on macOS)
